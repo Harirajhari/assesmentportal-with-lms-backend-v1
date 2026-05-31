@@ -7,6 +7,7 @@ const {
   MAX_POLL_ATTEMPTS,
   POLL_INTERVAL_MS,
 } = require('../config/judge0');
+const { wrapWithTimer, parseAlgoRuntime } = require('./timerHarness'); // ← ADD THIS
 
 const getJudge0Headers = () => ({
   'Content-Type': 'application/json',
@@ -14,23 +15,12 @@ const getJudge0Headers = () => ({
 
 const BASE_URL = () => process.env.JUDGE0_API_URL || 'https://judge0-ce.p.rapidapi.com';
 
-/**
- * Encode string to base64 (required by Judge0)
- */
 const encodeBase64 = (str) => Buffer.from(str || '').toString('base64');
-
-/**
- * Decode base64 string from Judge0
- */
 const decodeBase64 = (str) => {
   if (!str) return '';
   return Buffer.from(str, 'base64').toString('utf-8');
 };
 
-/**
- * Submit a single test case to Judge0
- * Returns a token for polling
- */
 const submitToJudge0 = async ({ code, language, stdin, expectedOutput, timeLimit, memoryLimit }) => {
   const languageId = LANGUAGE_IDS[language];
   if (!languageId) throw new Error(`Unsupported language: ${language}`);
@@ -40,8 +30,8 @@ const submitToJudge0 = async ({ code, language, stdin, expectedOutput, timeLimit
     language_id: languageId,
     stdin: encodeBase64(stdin || ''),
     expected_output: expectedOutput ? encodeBase64(expectedOutput) : undefined,
-    cpu_time_limit: timeLimit ? timeLimit / 1000 : 2, // Convert ms to seconds
-    memory_limit: memoryLimit ? memoryLimit * 1024 : 262144, // Convert MB to KB
+    cpu_time_limit: timeLimit ? timeLimit / 1000 : 2,
+    memory_limit: memoryLimit ? memoryLimit * 1024 : 262144,
     base64_encoded: true,
   };
 
@@ -62,9 +52,6 @@ const submitToJudge0 = async ({ code, language, stdin, expectedOutput, timeLimit
   }
 };
 
-/**
- * Poll Judge0 for result using token
- */
 const pollResult = async (token) => {
   let attempts = 0;
 
@@ -81,21 +68,19 @@ const pollResult = async (token) => {
       const data = response.data;
       const statusId = data.status?.id;
 
-      // Still processing
       if (statusId === STATUS.IN_QUEUE || statusId === STATUS.PROCESSING) {
         logger.debug(`Poll attempt ${attempts}/${MAX_POLL_ATTEMPTS} - Status: ${data.status?.description}`);
         continue;
       }
 
-      // Done - decode and return
       return {
         statusId,
         statusDescription: STATUS_MESSAGES[statusId] || data.status?.description || 'Unknown',
         stdout: decodeBase64(data.stdout),
         stderr: decodeBase64(data.stderr),
         compileOutput: decodeBase64(data.compile_output),
-        runtime: data.time ? parseFloat(data.time) * 1000 : null, // Convert to ms
-        memory: data.memory || null, // KB
+        runtime: data.time ? parseFloat(data.time) * 1000 : null, // Judge0 total time (ms)
+        memory: data.memory || null,
       };
     } catch (error) {
       logger.error(`Poll attempt ${attempts} error:`, error.message);
@@ -107,11 +92,18 @@ const pollResult = async (token) => {
 };
 
 /**
- * Run code against a single test case
+ * Run code against a single test case.
+ * Wraps user code in a timing harness so we get pure algorithm time
+ * (not JVM/interpreter startup) — same as LeetCode's ms display.
  */
 const runSingleTestCase = async ({ code, language, testCase, timeLimit, memoryLimit }) => {
+
+  // ── 1. Wrap code with timing harness ──────────────────────────────────────
+  const { code: timedCode, hasTimer } = wrapWithTimer(code, language);
+
+  // ── 2. Submit timed code to Judge0 ────────────────────────────────────────
   const token = await submitToJudge0({
-    code,
+    code: timedCode,           // ← use wrapped code, not original
     language,
     stdin: testCase.input,
     expectedOutput: testCase.expectedOutput,
@@ -121,12 +113,24 @@ const runSingleTestCase = async ({ code, language, testCase, timeLimit, memoryLi
 
   const result = await pollResult(token);
 
+  // ── 3. Parse algorithm runtime from stderr ────────────────────────────────
+  const algoRuntime = hasTimer ? parseAlgoRuntime(result.stderr) : null;
+
+  // ── 4. Strip the __exec_time__ marker from stderr before returning ─────────
+  const cleanStderr = result.stderr
+    ? result.stderr.replace(/__exec_time__:[\d.]+\r?\n?/, '').trim() || null
+    : null;
+
   const passed =
     result.statusId === STATUS.ACCEPTED ||
     (result.stdout.trim() === testCase.expectedOutput.trim() && result.statusId === STATUS.WRONG_ANSWER);
 
   return {
     ...result,
+    // algoRuntime = pure algorithm time (e.g. 1.2 ms)
+    // falls back to Judge0 total time if harness didn't work
+    runtime: algoRuntime ?? result.runtime,
+    stderr: cleanStderr,
     passed,
     input: testCase.input,
     expectedOutput: testCase.expectedOutput,
@@ -135,9 +139,6 @@ const runSingleTestCase = async ({ code, language, testCase, timeLimit, memoryLi
   };
 };
 
-/**
- * Run code against multiple test cases (batch-style sequential)
- */
 const runMultipleTestCases = async ({ code, language, testCases, timeLimit, memoryLimit }) => {
   const results = [];
   let allPassed = true;
@@ -152,7 +153,6 @@ const runMultipleTestCases = async ({ code, language, testCases, timeLimit, memo
     if (result.runtime) totalRuntime += result.runtime;
     if (result.memory) maxMemory = Math.max(maxMemory, result.memory);
 
-    // Short-circuit on compilation error
     if (result.statusId === STATUS.COMPILATION_ERROR) {
       allPassed = false;
       break;
@@ -168,33 +168,28 @@ const runMultipleTestCases = async ({ code, language, testCases, timeLimit, memo
     passedCount,
     totalTestCases: testCases.length,
     overallStatus,
-    avgRuntime: results.length > 0 ? Math.round(totalRuntime / results.length) : 0,
+    avgRuntime: results.length > 0
+      ? parseFloat((totalRuntime / results.length).toFixed(3))
+      : 0,
     maxMemory,
   };
 };
 
-/**
- * Determine overall submission status from results
- */
 const determineOverallStatus = (results, allPassed) => {
   if (allPassed) return 'Accepted';
 
   const statusIds = results.map(r => r.statusId);
 
-  if (statusIds.includes(STATUS.COMPILATION_ERROR)) return 'Compilation Error';
-  if (statusIds.includes(STATUS.TIME_LIMIT_EXCEEDED)) return 'Time Limit Exceeded';
-  if (
-    statusIds.some(id => [
-      STATUS.RUNTIME_ERROR_SIGSEGV,
-      STATUS.RUNTIME_ERROR_SIGXFSZ,
-      STATUS.RUNTIME_ERROR_SIGFPE,
-      STATUS.RUNTIME_ERROR_SIGABRT,
-      STATUS.RUNTIME_ERROR_NZEC,
-      STATUS.RUNTIME_ERROR_OTHER,
-    ].includes(id))
-  ) {
-    return 'Runtime Error';
-  }
+  if (statusIds.includes(STATUS.COMPILATION_ERROR))    return 'Compilation Error';
+  if (statusIds.includes(STATUS.TIME_LIMIT_EXCEEDED))  return 'Time Limit Exceeded';
+  if (statusIds.some(id => [
+    STATUS.RUNTIME_ERROR_SIGSEGV,
+    STATUS.RUNTIME_ERROR_SIGXFSZ,
+    STATUS.RUNTIME_ERROR_SIGFPE,
+    STATUS.RUNTIME_ERROR_SIGABRT,
+    STATUS.RUNTIME_ERROR_NZEC,
+    STATUS.RUNTIME_ERROR_OTHER,
+  ].includes(id))) return 'Runtime Error';
   if (statusIds.includes(STATUS.INTERNAL_ERROR)) return 'Internal Error';
 
   return 'Wrong Answer';

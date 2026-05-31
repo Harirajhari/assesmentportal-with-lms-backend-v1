@@ -1,25 +1,29 @@
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
+const http    = require('http');           // ← needed for Socket.io
+const cors    = require('cors');
+const helmet  = require('helmet');
+const morgan  = require('morgan');
 
-const connectDB = require('./config/db');
+const connectDB    = require('./config/db');
 const connectRedis = require('./config/redis');
-const logger = require('./config/logger');
+const logger       = require('./config/logger');
 const errorHandler = require('./middlewares/errorHandler');
 const { apiLimiter } = require('./middlewares/rateLimiter');
+const { initSocket } = require('./socket'); // ← new
 
 // Route imports
-const authRoutes = require('./routes/auth.routes');
-const collegeRoutes = require('./routes/college.routes');
-const studentRoutes = require('./routes/student.routes');
-const problemRoutes = require('./routes/problem.routes');
-const executionRoutes = require('./routes/execution.routes');
+const authRoutes       = require('./routes/auth.routes');
+const collegeRoutes    = require('./routes/college.routes');
+const studentRoutes    = require('./routes/student.routes');
+const problemRoutes    = require('./routes/problem.routes');
+const executionRoutes  = require('./routes/execution.routes');
 const submissionRoutes = require('./routes/submission.routes');
 const leaderboardRoutes = require('./routes/leaderboard.routes');
+const contestRoutes    = require('./routes/contest.routes'); // ← new
 
-const app = express();
+const app    = express();
+const server = http.createServer(app);     // ← wrap express in http.Server
 
 // Connect databases
 connectDB();
@@ -45,13 +49,14 @@ app.get('/health', (req, res) => {
 });
 
 // API Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/colleges', collegeRoutes);
-app.use('/api/students', studentRoutes);
-app.use('/api/problems', problemRoutes);
-app.use('/api', executionRoutes);
+app.use('/api/auth',        authRoutes);
+app.use('/api/colleges',    collegeRoutes);
+app.use('/api/students',    studentRoutes);
+app.use('/api/problems',    problemRoutes);
+app.use('/api',             executionRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
+app.use('/api/contests',    contestRoutes);   // ← new
 
 // 404 handler
 app.use('*', (req, res) => {
@@ -62,17 +67,17 @@ app.use('*', (req, res) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
+server.listen(PORT, () => {
   logger.info(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
+
+  // Init Socket.io AFTER server starts
+  initSocket(server, app);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    logger.info('Process terminated');
-    process.exit(0);
-  });
+  server.close(() => { logger.info('Process terminated'); process.exit(0); });
 });
 
 process.on('unhandledRejection', (err) => {
