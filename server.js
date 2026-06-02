@@ -20,7 +20,8 @@ const problemRoutes    = require('./routes/problem.routes');
 const executionRoutes  = require('./routes/execution.routes');
 const submissionRoutes = require('./routes/submission.routes');
 const leaderboardRoutes = require('./routes/leaderboard.routes');
-const contestRoutes    = require('./routes/contest.routes'); // ← new
+const contestRoutes    = require('./routes/contest.routes');
+const dailyRoutes      = require('./routes/daily.routes');
 
 const app    = express();
 const server = http.createServer(app);     // ← wrap express in http.Server
@@ -56,7 +57,8 @@ app.use('/api/problems',    problemRoutes);
 app.use('/api',             executionRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
-app.use('/api/contests',    contestRoutes);   // ← new
+app.use('/api/contests',    contestRoutes);
+app.use('/api/daily',       dailyRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

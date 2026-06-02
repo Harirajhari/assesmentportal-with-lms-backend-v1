@@ -36,12 +36,14 @@ const userSchema = new mongoose.Schema(
         return this.role === 'student';
       },
     },
-    // Statistics
+
+    // ── Statistics ────────────────────────────────────────────────────────────
     totalSolved: {
       type: Number,
       default: 0,
       min: 0,
     },
+    // General submission streak (any problem, any day)
     streak: {
       type: Number,
       default: 0,
@@ -60,7 +62,24 @@ const userSchema = new mongoose.Schema(
     lastSubmissionDate: {
       type: Date,
     },
-    // Auth
+
+    // ── Daily Challenge streak (separate from general streak) ─────────────────
+    currentStreak: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    longestStreak: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    lastChallengeDate: {
+      type: String,   // 'YYYY-MM-DD' — matches DailyChallengeEntry.date
+      default: null,
+    },
+
+    // ── Auth ──────────────────────────────────────────────────────────────────
     refreshToken: {
       type: String,
       select: false,
@@ -99,43 +118,36 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Calculate leaderboard score
+// Leaderboard score — now includes daily challenge streak bonus too
 userSchema.methods.getLeaderboardScore = function () {
-  const streakBonus = Math.floor(this.streak / 7) * 5; // 5 bonus per 7-day streak week
-  return this.totalSolved + streakBonus;
+  const submissionStreakBonus = Math.floor(this.streak / 7) * 5;       // 5 pts per 7-day submission streak
+  const dailyStreakBonus      = Math.floor(this.currentStreak / 7) * 10; // 10 pts per 7-day daily streak
+  return this.totalSolved + submissionStreakBonus + dailyStreakBonus;
 };
 
 // Update accuracy
-userSchema.methods.updateAccuracy = function (accepted) {
+userSchema.methods.updateAccuracy = function () {
   this.totalSubmissions += 1;
-  if (accepted) {
-    this.accuracy = parseFloat(
-      ((this.totalSolved / this.totalSubmissions) * 100).toFixed(2)
-    );
-  } else {
-    this.accuracy = parseFloat(
-      ((this.totalSolved / this.totalSubmissions) * 100).toFixed(2)
-    );
-  }
+  this.accuracy = parseFloat(
+    ((this.totalSolved / this.totalSubmissions) * 100).toFixed(2)
+  );
 };
 
-// Streak management
+// General submission streak (unchanged)
 userSchema.methods.updateStreak = function () {
-  const now = new Date();
+  const now  = new Date();
   const last = this.lastSubmissionDate;
 
   if (!last) {
     this.streak = 1;
   } else {
-    const diffMs = now - last;
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
+    const diffDays = Math.floor((now - last) / (1000 * 60 * 60 * 24));
     if (diffDays === 0) {
-      // Already submitted today, no change
+      // Already submitted today — no change
     } else if (diffDays === 1) {
       this.streak += 1; // Consecutive day
     } else {
-      this.streak = 1; // Reset streak
+      this.streak = 1;  // Reset
     }
   }
 
@@ -144,5 +156,6 @@ userSchema.methods.updateStreak = function () {
 
 userSchema.index({ collegeId: 1 });
 userSchema.index({ totalSolved: -1 });
+userSchema.index({ currentStreak: -1 }); // for streak leaderboard queries
 
 module.exports = mongoose.model('User', userSchema);
