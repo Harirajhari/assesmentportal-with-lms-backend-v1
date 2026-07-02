@@ -28,7 +28,7 @@ const server = http.createServer(app);     // ← wrap express in http.Server
 
 // Connect databases
 connectDB();
-connectRedis();
+//connectRedis();
 
 // Security & utility middlewares
 app.use(helmet());
